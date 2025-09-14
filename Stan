@@ -1,0 +1,104 @@
+data {
+  int<lower=1> N;       // 応答数
+  int<lower=1> J;       // 受験者数
+  int<lower=1> T;       // 時系列数
+  int<lower=2> K;       // カテゴリ数
+  int<lower=1, upper=J> person[N];   // 各観測の受験者ID
+  int<lower=1, upper=T> time[N];     // 各観測の時点ID
+  int<lower=1, upper=K> score[N];    // 各観測のカテゴリ
+  vector[N] inter1;  // 交互作用項: person * time など
+  vector[N] inter2;
+  vector[N] inter3;
+  vector[N] inter4;
+  real<lower=0> D;      // スケーリング定数（例：1.7）
+}
+
+parameters {
+  vector[J] theta;            // 受験者能力
+  vector[K] d_raw;            // カテゴリ閾値(生)
+  real mu_beta;
+  real<lower=0> sigma_beta;
+  real<lower=0> sigma_rw;
+  vector[T] beta;             // drift
+  real gamma1;                // 交互作用1
+  real gamma2;                // 交互作用2
+  real gamma3;                // 交互作用3
+  real gamma4;                // 交互作用4
+}
+
+transformed parameters {
+  vector[K] d;
+  d[1] = 0;
+  for (k in 2:K) d[k] = d_raw[k];
+  d = d - mean(d); // 識別性確保
+}
+
+model {
+  // 事前分布
+  theta ~ normal(0, 1);
+  d_raw ~ normal(0, 1);
+  mu_beta ~ normal(0, 1);
+  sigma_beta ~ lognormal(-1, 1);
+  sigma_rw ~ lognormal(-1, 1);
+
+  gamma1 ~ normal(0, 0.5);
+  gamma2 ~ normal(0, 0.5);
+  gamma3 ~ normal(0, 0.5);
+  gamma4 ~ normal(0, 0.5);
+
+  beta[1] ~ normal(mu_beta, sigma_beta);
+  for (t in 2:T) beta[t] ~ normal(beta[t-1], sigma_rw);
+
+  // 尤度
+  for (n in 1:N) {
+    int j = person[n];
+    int t = time[n];
+    int k_obs = score[n];
+    vector[K] numer;
+    for (k in 1:K) {
+      real acc = 0;
+      for (m in 1:k) {
+        acc += D * (
+          theta[j]
+          - beta[t]
+          - d[m]
+          + gamma1 * inter1[n]
+          + gamma2 * inter2[n]
+          + gamma3 * inter3[n]
+          + gamma4 * inter4[n]
+        );
+      }
+      numer[k] = acc;
+    }
+    target += numer[k_obs] - log_sum_exp(numer);
+  }
+}
+
+generated quantities {
+  int score_rep[N];
+  vector[N] log_lik;
+  for (n in 1:N) {
+    int j = person[n];
+    int t = time[n];
+    int k_obs = score[n];
+    vector[K] numer;
+    for (k in 1:K) {
+      real acc = 0;
+      for (m in 1:k) {
+        acc += D * (
+          theta[j]
+          - beta[t]
+          - d[m]
+          + gamma1 * inter1[n]
+          + gamma2 * inter2[n]
+          + gamma3 * inter3[n]
+          + gamma4 * inter4[n]
+        );
+      }
+      numer[k] = acc;
+    }
+    log_lik[n] = numer[k_obs] - log_sum_exp(numer);
+    vector[K] prob = softmax(numer);
+    score_rep[n] = categorical_rng(prob);
+  }
+}
