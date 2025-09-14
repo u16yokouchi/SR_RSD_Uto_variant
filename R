@@ -1,0 +1,110 @@
+library(readxl)
+library(dplyr)
+library(rstan)
+library(loo)
+
+# 1. データ読み込み＆添字変換
+df <- readxl::read_excel("Rater6_v2.xlsx") %>%
+  rename(
+    person = StudentID,
+    time   = TimeID,
+    score  = Score
+  ) %>%
+  mutate(
+    person = as.integer(as.factor(person)),
+    time   = as.integer(as.factor(time)),
+    score  = as.integer(score - min(score, na.rm = TRUE) + 1)
+  )
+
+# 2. 交互作用項の標準化
+df <- df %>%
+  mutate(
+    inter1 = as.numeric(scale(person * time)),
+    inter2 = as.numeric(scale(person * score)),
+    inter3 = as.numeric(scale(time * score)),
+    inter4 = as.numeric(scale(person * time * score))
+  )
+
+stan_data <- list(
+  N      = nrow(df),
+  J      = length(unique(df$person)),
+  T      = length(unique(df$time)),
+  K      = length(unique(df$score)),
+  person = df$person,
+  time   = df$time,
+  score  = df$score,
+  inter1 = as.vector(df$inter1),
+  inter2 = as.vector(df$inter2),
+  inter3 = as.vector(df$inter3),
+  inter4 = as.vector(df$inter4),
+  D      = 1.7
+)
+
+fit <- stan(
+  file = "modified_uto.stan",
+  data = stan_data,
+  iter = 4000, warmup = 2000, chains = 4, seed = 123,
+  control = list(adapt_delta = 0.99)
+)
+
+print(fit, pars = c("theta", "beta", "gamma1", "gamma2", "gamma3", "gamma4"))
+
+sims <- extract(fit)
+
+# β_tの事後平均プロット例
+if(!is.null(sims$beta)){
+  beta_mat <- sims$beta # [iterations, T]
+  beta_mean <- apply(beta_mat, 2, mean)
+  plot(beta_mean, type = "o", xlab = "Time (t)", ylab = expression(beta[t]),
+       main = expression(paste("Posterior Mean of ", beta[t])))
+}
+
+# ---- 追加: 事後予測p値 (PPP-value) ----
+if(!is.null(sims$score_rep)){
+  obs_score <- stan_data$score
+  score_rep <- sims$score_rep # [iterations, N]のはず
+  # 観測値と予測値が一致する比率（全体一致率）
+  ppp <- mean(score_rep == matrix(obs_score, nrow = nrow(score_rep), ncol = ncol(score_rep), byrow = TRUE))
+  cat("PPP (Posterior Predictive p-value: 観測とレプリケート一致率) =", round(ppp, 4), "\n")
+}
+
+# ---- 追加: WAICとLOO ----
+if(!is.null(sims$log_lik)){
+  log_lik <- sims$log_lik # [iterations, N]
+  waic_result <- waic(log_lik)
+  loo_result <- loo(log_lik)
+  print(waic_result)
+  print(loo_result)
+}
+
+# ---- 追加: RMSE（平均二乗誤差平方根） ----
+if(!is.null(sims$score_rep)){
+  # 予測値（レプリケート）の平均
+  pred_mean <- apply(sims$score_rep, 2, mean) # N次元
+  obs_score <- stan_data$score
+  rmse <- sqrt(mean((pred_mean - obs_score)^2))
+  cat("RMSE (Root Mean Squared Error) =", round(rmse, 4), "\n")
+}
+
+# 10. RhatとESS診断
+# パラメータ名はStanファイルのもの（ここでは "theta", "beta", "gamma1"～"gamma4"）
+
+summary_fit <- summary(fit, pars = c("theta", "beta", "gamma1", "gamma2", "gamma3", "gamma4"))$summary
+
+# Rhatが1.1超のパラメータ名を警告
+high_rhat_idx <- which(summary_fit[,"Rhat"] > 1.1)
+if(length(high_rhat_idx) > 0) {
+  cat("!!! The following parameters have Rhat > 1.1 (not converged):\n")
+  print(rownames(summary_fit)[high_rhat_idx])
+} else {
+  cat("All monitored parameters have Rhat <= 1.1 (converged).\n")
+}
+
+# ESS
+ess_vals <- summary_fit[,"n_eff"]
+cat("Effective Sample Size (ESS):\n")
+print(ess_vals)
+
+cat("Minimum ESS:", min(ess_vals, na.rm=TRUE), "\n")
+cat("Median  ESS:", median(ess_vals, na.rm=TRUE), "\n")
+cat("Maximum ESS:", max(ess_vals, na.rm=TRUE), "\n")
